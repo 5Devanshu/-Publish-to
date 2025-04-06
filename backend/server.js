@@ -6,6 +6,8 @@ import fetch from 'node-fetch';
 import session from 'express-session';
 import sqlite3Pkg from 'sqlite3';
 import axios from 'axios';
+import {spawn} from'child_process';
+import kardoJson from'./parseToJson.js';
 const sqlite3 = sqlite3Pkg.verbose();
 
 const app = express();
@@ -120,58 +122,59 @@ app.post('/api/chat', async (req, res) => {
 
 // Chat analysis endpoint
 app.post('/api/analyze-chat', (req, res) => {
-  let conversation;
+  const conversation = req.body.conversation;
 
-  if (req.body.conversation) {
-    // Use provided conversation if available
-    conversation = req.body.conversation;
-    analyzeConversation();
-  } else if (req.session.userId && req.session.conversationId) {
-    // Get from database for authenticated users
-    db.get(
-      'SELECT conversation_data FROM conversations WHERE id = ?',
-      [req.session.conversationId],
-      (err, row) => {
-        if (err || !row) {
-          return res.status(500).json({ error: 'Failed to retrieve conversation' });
-        }
-
-        conversation = row.conversation_data;
-        analyzeConversation();
-      }
-    );
-  } else {
-    // Use session storage for non-authenticated users
-    conversation = req.session.conversation || '';
-    analyzeConversation();
+  if (!conversation) {
+    return res.status(400).send('Conversation is required in req.body.conversation');
   }
 
-  function analyzeConversation() {
-    if (!conversation) {
-      return res.status(400).json({ error: 'No conversation to analyze' });
+  const pyProcess = spawn('python', ['analyze_chat.py', conversation]);
+
+  let output = '';
+  let errorOutput = '';
+
+  pyProcess.stdout.on('data', (data) => {
+    output += data.toString();
+  });
+
+  pyProcess.stderr.on('data', (data) => {
+    errorOutput += data.toString();
+  });
+
+  pyProcess.on('close', (code) => {
+    if (code === 0) {
+      const parsed = kardoJson(output);
+      
+      if (parsed?.requires_email) {
+        const subject = "Regarding your request";
+        const htmlBody = `
+          <div style="font-family:Arial, sans-serif; padding:20px;">
+            <h2 style="color:#0066cc;">Hi Jash,</h2>
+            <p>${parsed.email_context}</p>
+            <p style="margin-top:20px;">Best regards,<br><b>Team Tarang</b></p>
+          </div>
+        `;
+
+        const emailProcess = spawn('python', ['send_email.py', subject, htmlBody]);
+
+        emailProcess.stdout.on('data', (data) => {
+          console.log(`✅ Email Sent: ${data.toString()}`);
+        });
+
+        emailProcess.stderr.on('data', (data) => {
+          console.error(`❌ Email Send Error: ${data.toString()}`);
+        });
+
+        emailProcess.on('close', (emailCode) => {
+          console.log(`📨 Email script exited with code ${emailCode}`);
+        });
+      }
+
+      res.send(parsed);
+    } else {
+      res.status(500).send(`Python error:\n${errorOutput}`);
     }
-
-    // Execute Python script with conversation as argument
-    exec("python analyze_chat.py \"" + conversation.replace(/"/g, '\\\\"') + "\"", (error, stdout, stderr) => {
-      if (error) {
-        console.error("Python script execution error: " + error);
-        return res.status(500).json({ error: 'Failed to analyze conversation' });
-      }
-
-      if (stderr) {
-        console.error("Python stderr: " + stderr);
-      }
-
-      try {
-        // Parse the JSON output from the Python script
-        const analysis = JSON.parse(stdout);
-        res.json(analysis);
-      } catch (parseError) {
-        console.error("JSON parse error: " + parseError);
-        res.status(500).json({ error: 'Failed to parse analysis result', raw: stdout });
-      }
-    });
-  }
+  });
 });
 
 // Auth routes
