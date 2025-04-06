@@ -1,6 +1,6 @@
-# NexSupport
+# SupportAi
 
-NexSupport is a sophisticated customer support tool that leverages AI to analyze customer conversations and provide actionable insights. The application improves support efficiency and customer satisfaction by analyzing chat data, categorizing issues, detecting sentiment, and automating follow-up actions.
+SupportAI is a sophisticated customer support tool that leverages AI to analyze customer conversations and provide actionable insights. The application improves support efficiency and customer satisfaction by analyzing chat data, categorizing issues, detecting sentiment, and automating follow-up actions.
 
 ## Features
 
