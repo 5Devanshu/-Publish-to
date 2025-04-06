@@ -8,6 +8,11 @@
         ]
       }
       // ...
-    }
-  }
-  
+    },
+    "include": [
+      "chatbot/src/**/*"
+    ],
+    "exclude": [
+      "node_modules"
+    ]
+}

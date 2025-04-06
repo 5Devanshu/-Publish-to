@@ -1,14 +1,17 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const { exec } = require('child_process');
-const fetch = require('node-fetch'); // You might need to install this package
-const session = require('express-session');
-const sqlite3 = require('sqlite3').verbose();
+import express from 'express';
+import bodyParser from 'body-parser';
+import cors from 'cors';
+import { exec } from 'child_process';
+import fetch from 'node-fetch';
+import session from 'express-session';
+import sqlite3Pkg from 'sqlite3';
+import axios from 'axios';
+const sqlite3 = sqlite3Pkg.verbose();
 
 const app = express();
 const PORT = 3000;
-const OLLAMA_API_URL = 'http://localhost:11434/api/generate'; // Default Ollama API endpoint
+const GEMINI_API_KEY = 'AIzaSyD-LzirwWMvUYapypfIzwvKr13mYRNfYIY'; // User provided Gemini API key
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 // Middleware
 app.use(cors());
@@ -26,7 +29,7 @@ const db = new sqlite3.Database('users.db', (err) => {
     console.error(err.message);
   }
   console.log('Connected to the users database.');
-  
+
   // Create conversations table if it doesn't exist
   db.run(`CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,111 +65,63 @@ app.use((req, res, next) => {
   }
 });
 
-// Function to call Ollama API with Llama3 model
-async function callOllama(prompt, systemPrompt = '') {
+async function callGemini(prompt, systemPrompt = '') {
   try {
-    // Format the conversation for Ollama
     const requestBody = {
-      model: 'llama3', // Use the Llama3 model you have downloaded
-      prompt: prompt,
-      stream: false
+      contents: [{
+        parts: [{ text: prompt }]
+      }]
     };
-    
-    // Add system prompt if provided
-    if (systemPrompt) {
-      requestBody.system = systemPrompt;
-    }
-    
-    const response = await fetch(OLLAMA_API_URL, {
+
+    const response = await fetch(GEMINI_API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(requestBody)
     });
-    
+
     if (!response.ok) {
-      throw new Error(`Ollama API returned status ${response.status}`);
+      throw new Error(`Gemini API returned status ${response.status}`);
     }
-    
+
     const data = await response.json();
-    return data.response;
+    return data.candidates[0].content.parts[0].text;
   } catch (error) {
-    console.error('Error calling Ollama:', error);
+    console.error('Error calling Gemini:', error);
     throw error;
   }
 }
-
+let fullConversation = '';
 // Chat Route
 app.post('/api/chat', async (req, res) => {
-  const { prompt, systemPrompt } = req.body;
-  
-  // Get the current conversation
-  let currentConversation = '';
-  
-  if (req.session.userId && req.session.conversationId) {
-    // Get from database for authenticated users
-    db.get(
-      `SELECT conversation_data FROM conversations WHERE id = ?`,
-      [req.session.conversationId],
-      async (err, row) => {
-        if (err || !row) {
-          return res.status(500).json({ error: 'Failed to retrieve conversation' });
-        }
-        
-        currentConversation = row.conversation_data;
-        await processChat(currentConversation);
-      }
-    );
-  } else {
-    // Use session storage for non-authenticated users
-    currentConversation = req.session.conversation || '';
-    processChat(currentConversation);
-  }
-  
-  async function processChat(conversation) {
-    // Append user's message
-    const updatedConversation = conversation + `Customer: ${prompt}\n`;
-    
-    try {
-      // Call Ollama with Llama3 model
-      const reply = await callOllama(prompt, systemPrompt);
-      
-      // Append bot's reply
-      const finalConversation = updatedConversation + `Chatbot: ${reply}\n`;
-      
-      // Save the updated conversation
-      if (req.session.userId && req.session.conversationId) {
-        db.run(
-          `UPDATE conversations SET conversation_data = ? WHERE id = ?`,
-          [finalConversation, req.session.conversationId]
-        );
-      } else {
-        req.session.conversation = finalConversation;
-      }
-      
-      res.json({ 
-        reply, 
-        conversation: finalConversation 
-      });
-    } catch (err) {
-      console.error('Ollama Error:', err);
-      res.status(500).json({ error: 'Ollama error', message: err.message });
-    }
-  }
-});
+  const { prompt } = req.body;
+  fullConversation += `Customer: ${prompt}\n`;
 
-// Maintaining the old endpoint for backward compatibility
-app.post('/api/gemini-chat', async (req, res) => {
-  // Redirect to the new endpoint
-  req.url = '/api/chat';
-  app.handle(req, res);
+  try {
+    const response = await axios.post(GEMINI_API_URL, {
+      contents: [
+        {
+          parts: [{ text: fullConversation }],
+          role: 'user'
+        }
+      ]
+    });
+
+    const reply = response.data.candidates[0].content.parts[0].text.trim();
+    fullConversation += `Chatbot: ${reply}\n`;
+
+    res.json({ reply, conversation: fullConversation });
+  } catch (error) {
+    console.error(error.response?.data || error.message);
+    res.status(500).json({ error: 'Gemini API error' });
+  }
 });
 
 // Chat analysis endpoint
 app.post('/api/analyze-chat', (req, res) => {
   let conversation;
-  
+
   if (req.body.conversation) {
     // Use provided conversation if available
     conversation = req.body.conversation;
@@ -174,13 +129,13 @@ app.post('/api/analyze-chat', (req, res) => {
   } else if (req.session.userId && req.session.conversationId) {
     // Get from database for authenticated users
     db.get(
-      `SELECT conversation_data FROM conversations WHERE id = ?`,
+      'SELECT conversation_data FROM conversations WHERE id = ?',
       [req.session.conversationId],
       (err, row) => {
         if (err || !row) {
           return res.status(500).json({ error: 'Failed to retrieve conversation' });
         }
-        
+
         conversation = row.conversation_data;
         analyzeConversation();
       }
@@ -190,63 +145,31 @@ app.post('/api/analyze-chat', (req, res) => {
     conversation = req.session.conversation || '';
     analyzeConversation();
   }
-  
+
   function analyzeConversation() {
     if (!conversation) {
       return res.status(400).json({ error: 'No conversation to analyze' });
     }
-    
+
     // Execute Python script with conversation as argument
-    exec(`python analyze_chat.py "${conversation.replace(/"/g, '\\"')}"`, (error, stdout, stderr) => {
+    exec("python analyze_chat.py \"" + conversation.replace(/"/g, '\\\\"') + "\"", (error, stdout, stderr) => {
       if (error) {
-        console.error(`Python script execution error: ${error}`);
+        console.error("Python script execution error: " + error);
         return res.status(500).json({ error: 'Failed to analyze conversation' });
       }
-      
+
       if (stderr) {
-        console.error(`Python stderr: ${stderr}`);
+        console.error("Python stderr: " + stderr);
       }
-      
+
       try {
         // Parse the JSON output from the Python script
         const analysis = JSON.parse(stdout);
         res.json(analysis);
       } catch (parseError) {
-        console.error(`JSON parse error: ${parseError}`);
+        console.error("JSON parse error: " + parseError);
         res.status(500).json({ error: 'Failed to parse analysis result', raw: stdout });
       }
-    });
-  }
-});
-
-// Add a health check endpoint to verify Ollama is running
-app.get('/api/ollama-status', async (req, res) => {
-  try {
-    // List models to check if Ollama is running
-    const response = await fetch('http://localhost:11434/api/tags');
-    
-    if (!response.ok) {
-      throw new Error(`Ollama API returned status ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Check if Llama3 model is available
-    const hasLlama3 = data.models && data.models.some(model => 
-      model.name === 'llama3' || model.name.startsWith('llama3:')
-    );
-    
-    res.json({ 
-      status: 'ok', 
-      ollama_running: true,
-      llama3_available: hasLlama3,
-      available_models: data.models ? data.models.map(m => m.name) : []
-    });
-  } catch (error) {
-    res.json({ 
-      status: 'error', 
-      ollama_running: false,
-      message: error.message
     });
   }
 });
@@ -260,17 +183,17 @@ app.post('/signup', (req, res) => {
   }
 
   // Insert user into the database
-  db.run(`INSERT INTO users (name, email, password) VALUES (?, ?, ?)`, [name, email, password], function(err) {
+  db.run("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", [name, email, password], function(err) {
     if (err) {
-      return res.status(500).send(`Signup failed: ${err.message}`);
+      return res.status(500).send("Signup failed: " + err.message);
     }
-    
+
     // Set user as logged in
     req.session.userId = this.lastID;
-    
-    res.status(201).send({ 
-      message: 'User created successfully', 
-      userId: this.lastID 
+
+    res.status(201).send({
+      message: 'User created successfully',
+      userId: this.lastID
     });
   });
 });
@@ -283,21 +206,21 @@ app.post('/login', (req, res) => {
   }
 
   // Retrieve user from the database
-  db.get(`SELECT * FROM users WHERE email = ? AND password = ?`, [email, password], (err, row) => {
+  db.get("SELECT * FROM users WHERE email = ? AND password = ?", [email, password], (err, row) => {
     if (err) {
-      return res.status(500).send(`Login failed: ${err.message}`);
+      return res.status(500).send("Login failed: " + err.message);
     }
 
     if (!row) {
       return res.status(401).send('Invalid credentials.');
     }
-    
+
     // Set user as logged in
     req.session.userId = row.id;
-    
-    res.send({ 
-      message: 'Login successful', 
-      userId: row.id 
+
+    res.send({
+      message: 'Login successful',
+      userId: row.id
     });
   });
 });
@@ -312,7 +235,6 @@ app.post('/logout', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log(`Ollama integration enabled with Llama3 model`);
-  console.log(`Check Ollama status at http://localhost:${PORT}/api/ollama-status`);
+  console.log(`'Server running at http://localhost:\${PORT}'`);
+  console.log(`Gemini integration enabled`);
 });
